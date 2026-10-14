@@ -138,12 +138,18 @@ end
 function _sparse_fay_rows(structure, thetas, columns::Vector{Int})
   position = Dict(c => k for (k, c) in enumerate(columns))
   rows = Tuple{Vector{Int}, Vector{AcbFieldElem}}[]
+  # the pairs (c1, c2) = (base, base + rho) repeat across the relations of
+  # one rho: cache their products
+  pair_products = Dict{Any, AcbFieldElem}()
   for terms in structure
     entries = Dict{Int, AcbFieldElem}()
     for (column, coefficient, c1, c2, c3) in terms
       k = get(position, column, 0)
       k == 0 && continue
-      value = coefficient * (thetas[c1] * thetas[c2] * thetas[c3])
+      pair = get!(pair_products, (c1, c2)) do
+        thetas[c1] * thetas[c2]
+      end
+      value = coefficient * (pair * thetas[c3])
       entries[k] = haskey(entries, k) ? entries[k] + value : value
     end
     filter!(e -> !iszero(e[2]), entries)
@@ -179,8 +185,11 @@ _acb_add!(z::AcbFieldElem, x::AcbFieldElem, y::AcbFieldElem, p::Int) =
 # Returns K (n x nullity) and log2 of the relative residual of the scaled
 # matrix on the midpoints of all rows.
 function _sparse_kernel(rows, n::Int, nullity::Int; max_iterations::Int = 300, verbose::Bool = false,
-                        basis_rows::Bool = false, dense_limit::Int = 4000, big_limit::Int = 600)
+                        basis_rows::Bool = false, dense_limit::Int = 4000, big_limit::Int = 600,
+                        sparse::Union{Nothing, Bool} = nothing, sparse_limit::Int = 1500,
+                        sparse_tol::Float64 = 1e-13)
   LA = RSR.LinearAlgebra
+  SA = Hecke.SparseArrays
   start_time = time()
   elapsed() = round(time() - start_time, digits = 1)
   CC = parent(rows[1][2][1])
@@ -211,13 +220,43 @@ function _sparse_kernel(rows, n::Int, nullity::Int; max_iterations::Int = 300, v
   end
   mids = [map(RSR._acb_mid, vals) for vals in scaled]
   wide = false                             # BigFloat pivots (see below)
-  A0 = zeros(ComplexF64, m, n)
-  for (i, (cols, _)) in enumerate(rows), (k, j) in enumerate(cols)
-    A0[i, j] = RSR._mid_c64_scaled(mids[i][k], 0, tmp)
+  # the Float64 matrix: sparse (SuiteSparse) for large n, dense otherwise
+  use_sparse = sparse === nothing ? n > sparse_limit : sparse
+  if use_sparse
+    Is, Js, Vs = Int[], Int[], ComplexF64[]
+    for (i, (cols, _)) in enumerate(rows), (k, j) in enumerate(cols)
+      push!(Is, i); push!(Js, j); push!(Vs, RSR._mid_c64_scaled(mids[i][k], 0, tmp))
+    end
+    @req all(isfinite, Vs) "Non-finite Fay relations at machine precision (theta constants with infinite radius?)."
+    A0 = SA.sparse(Is, Js, Vs, m, n)
+  else
+    A0 = zeros(ComplexF64, m, n)
+    for (i, (cols, _)) in enumerate(rows), (k, j) in enumerate(cols)
+      A0[i, j] = RSR._mid_c64_scaled(mids[i][k], 0, tmp)
+    end
+    @req all(isfinite, A0) "Non-finite Fay relations at machine precision (theta constants with infinite radius?)."
   end
-  @req all(isfinite, A0) "Non-finite Fay relations at machine precision (theta constants with infinite radius?)."
-  verbose && println("A0 built and scaled ($m x $n; column scales 2^$(-maximum(column_shift)) to 2^$(-minimum(column_shift))) [$(elapsed()) s]")
-  if n > dense_limit
+  verbose && println("A0 built and scaled ($m x $n$(use_sparse ? ", sparse, $(SA.nnz(A0)) entries" : ""); column scales 2^$(-maximum(column_shift)) to 2^$(-minimum(column_shift))) [$(elapsed()) s]")
+  if use_sparse
+    # sparse rank-revealing QR (SPQR, multifrontal): the column permutation
+    # puts the r independent columns first (entries are scaled to about 1,
+    # so sparse_tol is an absolute threshold on the R diagonal); then the
+    # pivot columns on all rows as in the dense large-n branch, corrections
+    # by sparse least squares. No BigFloat fallback here.
+    Fa = SA.qr(A0; tol = sparse_tol)
+    ra = LA.rank(Fa)
+    verbose && println("sparse QR done: numerical rank $ra (expected $r), nnz(R) = $(SA.nnz(Fa.R)) [$(elapsed()) s]")
+    @req ra == r "The Fay relations do not have rank $r at machine precision (sparse QR with tol = $sparse_tol finds $ra; adjust sparse_tol, or use sparse = false)."
+    piv = sort(Fa.pcol[1:r])
+    free = sort(Fa.pcol[r + 1:n])
+    prows = collect(1:m)
+    Fp = SA.qr(A0[:, piv]; tol = sparse_tol)
+    @req LA.rank(Fp) == r "The pivot columns of the Fay relations are rank deficient at machine precision."
+    Rp = LA.UpperTriangular(Fp.R)
+    pcp = Fp.pcol                          # A0[:, piv][:, pcp] = Q Rp (up to row order)
+    solve_correction = D -> Fp \ D
+    inverse_normal = v -> (w = zeros(ComplexF64, r); w[pcp] = Rp \ (Rp' \ v[pcp]); w)
+  elseif n > dense_limit
     # large n (pivoted QRs too slow: BLAS 2). The Float64 kernel from the
     # unpivoted (BLAS 3) Householder QR A0 = Q R: kernel(A0) = kernel(R), by
     # subspace inverse iteration with R^H R (triangular solves); the free
@@ -302,7 +341,7 @@ function _sparse_kernel(rows, n::Int, nullity::Int; max_iterations::Int = 300, v
   verbose && println("pivots chosen, sigma_min of the pivot columns about $sigma [$(elapsed()) s]")
   @req sigma > (wide ? 2.0^(60 - precision(BigFloat)) : 1e-14) "The Fay relations have rank < $r at machine precision (sigma_min of the pivot columns $sigma)."
   # the Float64 residual of the kernel estimate on all rows: rank check
-  Xf = -solve_correction(A0[prows, free])
+  Xf = -solve_correction(Matrix(A0[prows, free]))
   Kf = zeros(ComplexF64, n, nullity)
   Kf[piv, :] = Xf
   for (c, j) in enumerate(free)
@@ -334,7 +373,8 @@ function _sparse_kernel(rows, n::Int, nullity::Int; max_iterations::Int = 300, v
       active[c] || continue
       working = min(prec + 32, bits[c] + 128)
       Xc, Rc = X[c], R[c]
-      for k in 1:nres
+      # (the rows are independent: each k writes only Rc[k])
+      Threads.@threads for k in 1:nres
         s = Rc[k]
         ccall((:acb_zero, Hecke.libflint), Nothing, (Ref{AcbFieldElem},), s)
         for (cf, a) in free_terms[k]
@@ -433,9 +473,13 @@ midpoints. The relations, in this order of preference: `relations` (a list
 of find_fay_relations or a file of save_fay_relations); those of `rhos` or
 of _fay_rhos(g) (genus 4 and 5), of which a basis is chosen for this curve;
 the file _default_fay_data_file(g) if it exists; find_fay_relations for
-this curve (slow for g >= 6: save its result).
+this curve (slow for g >= 6: save its result). Further keywords go to
+_sparse_kernel: `sparse` (true/false; by default for n > `sparse_limit` =
+1500, i.e. g >= 6: the Float64 phase with SuiteSparse instead of dense QR;
+g = 7: 7 s instead of 51 s), `sparse_tol`.
 """
-function odd_theta_gradient_kernel(g::Int, thetas; rhos = nothing, relations = nothing, verbose::Bool = false)
+function odd_theta_gradient_kernel(g::Int, thetas; rhos = nothing, relations = nothing, verbose::Bool = false,
+                                   kernel_kw...)
   odd_indices = char_to_index.(collect.(odd_theta_characteristics(g)))
   structure, stored_relations = _fay_structure(g, thetas, odd_indices; rhos = rhos, relations = relations)
   verbose && println("structure: $(length(structure)) relations")
@@ -443,7 +487,7 @@ function odd_theta_gradient_kernel(g::Int, thetas; rhos = nothing, relations = n
   verbose && println("sparse rows: $(length(rows)), $(sum(r -> length(r[1]), rows)) entries")
   # stored relations (find_fay_relations): the first n_odd - g are a basis
   stored = stored_relations && length(rows) == length(structure)
-  return _sparse_kernel(rows, length(odd_indices), g; verbose = verbose, basis_rows = stored)
+  return _sparse_kernel(rows, length(odd_indices), g; verbose = verbose, basis_rows = stored, kernel_kw...)
 end
 
 # The Fay relations used by odd_theta_gradient_kernel (see there for the

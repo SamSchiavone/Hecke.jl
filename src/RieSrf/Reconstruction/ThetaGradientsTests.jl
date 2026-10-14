@@ -176,3 +176,41 @@ function test_theta_gradients_pipeline(; prec::Int = 300, g::Int = 5, coefficien
     @test r_fay.log2_difference <= -prec / 2
   end
 end
+
+################################################################################
+#  The sparse Float64 phase of the Fay kernel (for the Prym)
+################################################################################
+
+@doc raw"""
+    time_fay_kernel(g; prec = 256, seed = 1, dense = true) -> NamedTuple
+
+The Fay kernel odd_theta_gradient_kernel(g, thetas) of a random reduced
+period matrix with the sparse Float64 phase (SuiteSparse) and, with `dense`,
+with the dense one (the code before; skip for g >= 8): times, residuals, and
+log2 of the relative difference after the common linear map (the kernels
+agree up to GL_g); also against odd_theta_gradients. Needs ReconstructGenusG.jl
+and the Fay relations of genus g (_fay_rhos for g <= 5, the files
+G6FayRelations, G7FayRelations, ... in SignMatrices otherwise).
+"""
+function time_fay_kernel(g::Int; prec::Int = 256, seed::Int = 1, dense::Bool = true, verbose::Bool = false)
+  tau = random_period_matrix(g, prec; seed = seed)
+  t_thetas = @elapsed thetas = Hecke.thetas([zero(base_ring(tau)) for _ in 1:g], tau)
+  t_grad = @elapsed (K, _) = odd_theta_gradients(tau)
+  t_sparse = @elapsed (K_sparse, q_sparse) = odd_theta_gradient_kernel(g, thetas; sparse = true, verbose = verbose)
+  agree_sparse = _kernel_vs_gradients(K_sparse, K)
+  result = (g = g, n = nrows(K), time_thetas = t_thetas, time_gradients = t_grad,
+            time_sparse = t_sparse, residual_sparse = q_sparse, agreement_sparse = agree_sparse)
+  println("g = $g (n = $(nrows(K))): thetas $(round(t_thetas, digits = 2)) s, odd_theta_gradients $(round(t_grad, digits = 2)) s, ",
+          "Fay kernel sparse $(round(t_sparse, digits = 2)) s (residual 2^$(round(q_sparse, digits = 1)), vs gradients 2^$(round(agree_sparse, digits = 1)))")
+  if dense
+    t_dense = @elapsed (K_dense, q_dense) = odd_theta_gradient_kernel(g, thetas; sparse = false, verbose = verbose)
+    agree_dense = _kernel_vs_gradients(K_dense, K)
+    # (the two kernels are normalized on possibly different free columns:
+    # compare up to the common linear map)
+    diff = _kernel_vs_gradients(K_dense, K_sparse)
+    result = merge(result, (time_dense = t_dense, residual_dense = q_dense, agreement_dense = agree_dense,
+                            sparse_vs_dense = diff))
+    println("          Fay kernel dense $(round(t_dense, digits = 2)) s (residual 2^$(round(q_dense, digits = 1)), vs gradients 2^$(round(agree_dense, digits = 1))); sparse vs dense kernel 2^$(round(diff, digits = 1))")
+  end
+  return result
+end

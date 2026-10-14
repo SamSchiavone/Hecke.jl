@@ -953,7 +953,10 @@ theta constants of the Prym (Schottky-Jung, signs by Riemann's relations with
 `sign_data` of genus g - 1), the kernels of Fay's relations for both (the
 gradients up to a common linear map: `gradients`, rows the odd
 characteristics) and the quadrics from the relations between the squares of
-the Prym gradients, in the coordinates of `gradients`. The theta constants
+the Prym gradients, in the coordinates of `gradients`. With `gradients` (a
+matrix as odd_theta_gradients gives it, from the period matrix) the Fay
+kernel of the curve is skipped and these rows are used instead (the Prym
+kernel is still computed from the Prym theta constants). The theta constants
 need not come from a Jacobian: with `strict = false` nothing is required of
 the residuals, and `info` reports them (about -precision if the relations
 hold) and the singular values of the relation matrix (`quadric_singular_values`,
@@ -969,7 +972,8 @@ gap).
 function reconstruct_quadrics_from_thetas(g::Int, thetas; sign_data = nothing, rhos = nothing,
                                           prym_rhos = nothing, fay_relations = nothing,
                                           prym_fay_relations = nothing, sign_fallback::Bool = true,
-                                          strict::Bool = true, diagnostics::Bool = false, verbose::Bool = false)
+                                          strict::Bool = true, diagnostics::Bool = false, verbose::Bool = false,
+                                          gradients = nothing)
   @req g >= 5 "Only for g >= 5."
   times = Dict{Symbol, Float64}()
   stage(name) = (t = time(); () -> (times[name] = time() - t;
@@ -980,7 +984,13 @@ function reconstruct_quadrics_from_thetas(g::Int, thetas; sign_data = nothing, r
   _, sufficient = correct_signs_with_data!(thetas_prym, g - 1, pairs_prym; fallback = sign_fallback)
   done()
   done = stage(:gradient_kernel)
-  K, q_K = odd_theta_gradient_kernel(g, thetas; rhos = rhos, relations = fay_relations, verbose = verbose)
+  if gradients === nothing
+    K, q_K = odd_theta_gradient_kernel(g, thetas; rhos = rhos, relations = fay_relations, verbose = verbose)
+  else
+    # the gradients themselves (odd_theta_gradients, from the period matrix):
+    # no Fay kernel for the curve; the Prym below still needs it
+    K, q_K = gradients, -Inf
+  end
   done()
   done = stage(:prym_gradient_kernel)
   K_prym, q_K_prym = odd_theta_gradient_kernel(g - 1, thetas_prym; rhos = prym_rhos, relations = prym_fay_relations)
@@ -1187,12 +1197,21 @@ sign data of genus g). `sign_data`: the sign data of genus
 g - 1 (a file for load_sign_data or the loaded pairs; default
 _default_sign_data_file(g - 1)); `rhos`, `prym_rhos`: see
 odd_theta_gradient_kernel; `sign_fallback`: see correct_signs_with_data!.
+`gradient_method`: `:theta` (default; the gradients of the odd theta
+functions evaluated from tau by odd_theta_gradients of ThetaGradients.jl,
+which must be loaded: g theta evaluations instead of the Fay linear system
+for the curve; the Prym kernel is still the Fay kernel of genus g - 1) or
+`:fay` (the Fay kernel for the curve too, as before). With `:theta` and
+`coordinates = true`, `coordinates` is the identity (the quadrics are in the
+coordinates of z) unless `check_coordinates = true`, which recomputes a few
+gradients with acb_theta_jet as an independent check (`info.coordinates`).
 """
 function reconstruct_quadrics_data(tau::AcbMatrix; sign_data = nothing, rhos = nothing,
                                    prym_rhos = nothing, sign_fallback::Bool = true,
                                    coordinates::Bool = false, theta_method::Symbol = :flint,
                                    curve_sign_data = nothing, fay_relations = nothing,
                                    prym_fay_relations = nothing, certified_fixed_signs::Bool = true,
+                                   gradient_method::Symbol = :theta, check_coordinates::Bool = false,
                                    verbose::Bool = false)
   g = nrows(tau)
   times = Dict{Symbol, Float64}()
@@ -1212,19 +1231,35 @@ function reconstruct_quadrics_data(tau::AcbMatrix; sign_data = nothing, rhos = n
   done()
   vanishing = RSR._vanishing_even_theta_constants(thetas, prec)
   @req isempty(vanishing) "$(length(vanishing)) even theta constants vanish; only generic curves are supported."
+  @req gradient_method in (:theta, :fay) "gradient_method must be :theta or :fay."
+  gradients = nothing
+  if gradient_method === :theta
+    # the gradients of the odd theta functions from tau (ThetaGradients.jl)
+    # instead of the Fay kernel; the Prym kernel is unaffected
+    done = stage(:theta_gradients)
+    gradients, info_gradients = odd_theta_gradients(tau_red; verbose = verbose)
+    done()
+  end
   result = reconstruct_quadrics_from_thetas(g, thetas; sign_data = sign_data, rhos = rhos,
                                             prym_rhos = prym_rhos, fay_relations = fay_relations,
                                             prym_fay_relations = prym_fay_relations,
-                                            sign_fallback = sign_fallback, verbose = verbose)
+                                            sign_fallback = sign_fallback, verbose = verbose,
+                                            gradients = gradients)
   # (not pairs(...): a global `pairs` in Main, e.g. sign data, would shadow it)
   for (k, v) in zip(keys(result.info.times), values(result.info.times))
     times[k] = v
   end
   quadrics, K = result.quadrics, result.gradients
   done = stage(:gradient_coordinates)
-  B, q_B = coordinates ? _gradient_coordinates(tau_red, K) : (nothing, NaN)
+  if coordinates && gradient_method === :theta && !check_coordinates
+    # K already is the matrix of gradients: the coordinates are those of z
+    B, q_B = identity_matrix(CC, g), -Inf
+  else
+    B, q_B = coordinates ? _gradient_coordinates(tau_red, K) : (nothing, NaN)
+  end
   done()
   info = merge(result.info, (coordinates = q_B, times = (; times...)))
+  gradient_method === :theta && (info = merge(info, (theta_gradients = info_gradients,)))
   return (quadrics = quadrics, tau = tau_red, transform = T, coordinates = B, info = info)
 end
 

@@ -1,4 +1,4 @@
-julia -t 4 --gcthreads=4
+# julia -t 4 --gcthreads=4
 
 using Oscar
 include("src/RieSrf/Reconstruction/ReconstructCurveAuxiliary.jl")
@@ -9,7 +9,7 @@ include("src/RieSrf/Reconstruction/ReconstructGenusGTests.jl")
 include("src/RieSrf/Reconstruction/ThetaGradientsTests.jl")
 
 leading_coefficient = Hecke.leading_coefficient
-
+g = 8
 curve = canonical_test_curve(g; coefficients = -3:3, node_range = -5:5)
 prec = 128
 RS = riemann_surface_with_differentials(curve.plane, curve.numerators, prec)

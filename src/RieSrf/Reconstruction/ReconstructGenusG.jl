@@ -133,6 +133,34 @@ function _selected_fay_structure(g::Int, thetas, rhos, odd_indices::Vector{Int};
   return structure[keep]
 end
 
+# The unit vectors e_(g+1), ..., e_(2g) of GF(2)^(2g): the rho whose Fay
+# relations span all of them (the bases found by find_fay_relations for
+# g = 6, 7 consist of exactly these), to be used without selecting a basis
+function _unit_fay_rhos(g::Int)
+  F = GF(2)
+  return [F.([i == g + k ? 1 : 0 for i in 1:2*g]) for k in 1:g]
+end
+
+# The rows without duplicates and proportional ones (the same relation from
+# several (w, rho)): keyed by the columns and the midpoints at machine
+# precision normalized by the first entry (rounded; a rare miss keeps a
+# duplicate, which is harmless for a least squares kernel)
+function _distinct_rows(rows)
+  seen = Set{Any}()
+  kept = similar(rows, 0)
+  for (cols, vals) in rows
+    v = [RSR._c64(x) for x in vals]
+    j = findfirst(!iszero, v)
+    j === nothing && continue
+    u = v ./ v[j]
+    key = (cols, [round(real(x), sigdigits = 9) for x in u], [round(imag(x), sigdigits = 9) for x in u])
+    key in seen && continue
+    push!(seen, key)
+    push!(kept, (cols, vals))
+  end
+  return kept
+end
+
 # The relations of the structure at the theta constants as sparse rows
 # (columns: positions in `columns`, values; empty rows dropped)
 function _sparse_fay_rows(structure, thetas, columns::Vector{Int})
@@ -471,28 +499,50 @@ the gradients of the odd theta functions at 0, i.e. the gradients up to a
 common linear transformation, and log2 of its relative residual on the
 midpoints. The relations, in this order of preference: `relations` (a list
 of find_fay_relations or a file of save_fay_relations); those of `rhos` or
-of _fay_rhos(g) (genus 4 and 5), of which a basis is chosen for this curve;
-the file _default_fay_data_file(g) if it exists; find_fay_relations for
-this curve (slow for g >= 6: save its result). Further keywords go to
-_sparse_kernel: `sparse` (true/false; by default for n > `sparse_limit` =
-1500, i.e. g >= 6: the Float64 phase with SuiteSparse instead of dense QR;
-g = 7: 7 s instead of 51 s), `sparse_tol`.
+of _fay_rhos(g) (genus 4 and 5), of which a basis is chosen for this curve
+(with `select = false`: all of them, as an overdetermined sparse system for
+the SuiteSparse phase, duplicates removed; `rhos = :unit` are the g unit
+vectors e_(g+1), ..., e_(2g), whose relations span all Fay relations: no
+search, no stored file, and the tall matrix is better conditioned than any
+basis chosen at machine precision); the file _default_fay_data_file(g) if
+it exists; find_fay_relations for this curve (slow for g >= 6: save its
+result). Further keywords go to _sparse_kernel: `sparse` (true/false; by
+default for n > `sparse_limit` = 1500, i.e. g >= 6: the Float64 phase with
+SuiteSparse instead of dense QR; g = 7: 7 s instead of 51 s), `sparse_tol`.
 """
-function odd_theta_gradient_kernel(g::Int, thetas; rhos = nothing, relations = nothing, verbose::Bool = false,
-                                   kernel_kw...)
+function odd_theta_gradient_kernel(g::Int, thetas; rhos = nothing, relations = nothing, select::Bool = true,
+                                   verbose::Bool = false, kernel_kw...)
   odd_indices = char_to_index.(collect.(odd_theta_characteristics(g)))
-  structure, stored_relations = _fay_structure(g, thetas, odd_indices; rhos = rhos, relations = relations)
-  verbose && println("structure: $(length(structure)) relations")
-  rows = _sparse_fay_rows(structure, thetas, odd_indices)
+  if select
+    structure, stored_relations = _fay_structure(g, thetas, odd_indices; rhos = rhos, relations = relations)
+    verbose && println("structure: $(length(structure)) relations")
+    rows = _sparse_fay_rows(structure, thetas, odd_indices)
+    # stored relations (find_fay_relations): the first n_odd - g are a basis
+    stored = stored_relations && length(rows) == length(structure)
+  else
+    # all relations of the rhos, one rho at a time (the structure of one rho
+    # is 2^(2g-1) relations with 5 2^(g-3) terms each: 2 GB for g = 8)
+    rhos === :unit && (rhos = _unit_fay_rhos(g))
+    rhos === nothing && (rhos = _fay_rhos(g))
+    @req rhos !== nothing "select = false needs rhos (e.g. rhos = :unit)."
+    rows = Tuple{Vector{Int}, Vector{AcbFieldElem}}[]
+    for rho in rhos
+      append!(rows, _sparse_fay_rows(fay_matrix_structure(g, rho), thetas, odd_indices))
+      verbose && println("rho = $(Int.(lift.(Ref(ZZ), rho))): $(length(rows)) rows so far")
+    end
+    before = length(rows)
+    rows = _distinct_rows(rows)
+    verbose && println("distinct rows: $(length(rows)) of $before")
+    stored = false
+  end
   verbose && println("sparse rows: $(length(rows)), $(sum(r -> length(r[1]), rows)) entries")
-  # stored relations (find_fay_relations): the first n_odd - g are a basis
-  stored = stored_relations && length(rows) == length(structure)
   return _sparse_kernel(rows, length(odd_indices), g; verbose = verbose, basis_rows = stored, kernel_kw...)
 end
 
 # The Fay relations used by odd_theta_gradient_kernel (see there for the
 # order of preference) and whether they are stored ones
 function _fay_structure(g::Int, thetas, odd_indices::Vector{Int}; rhos = nothing, relations = nothing)
+  rhos === :unit && (rhos = _unit_fay_rhos(g))
   rhos === nothing && relations === nothing && (rhos = _fay_rhos(g))
   if relations === nothing && rhos === nothing
     file = _default_fay_data_file(g)

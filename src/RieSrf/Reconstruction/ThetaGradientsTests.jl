@@ -182,29 +182,51 @@ end
 ################################################################################
 
 @doc raw"""
-    time_fay_kernel(g; prec = 256, seed = 1, dense = true) -> NamedTuple
+    time_fay_kernel(g; prec = 256, seed = 1, stored = true, dense = true, unit = true, gradients = true) -> NamedTuple
 
 The Fay kernel odd_theta_gradient_kernel(g, thetas) of a random reduced
-period matrix with the sparse Float64 phase (SuiteSparse) and, with `dense`,
-with the dense one (the code before; skip for g >= 8): times, residuals, and
-log2 of the relative difference after the common linear map (the kernels
-agree up to GL_g); also against odd_theta_gradients. Needs ReconstructGenusG.jl
-and the Fay relations of genus g (_fay_rhos for g <= 5, the files
-G6FayRelations, G7FayRelations, ... in SignMatrices otherwise).
+period matrix, in up to three ways: `stored` relations (the basis of
+find_fay_relations: _fay_rhos for g <= 5, the files G6FayRelations,
+G7FayRelations, ... in SignMatrices otherwise) with the sparse Float64
+phase (SuiteSparse) and, with `dense`, with the dense one (the code before;
+skip for g >= 8); and `unit`: all relations of the unit rhos, no basis
+selection (`rhos = :unit, select = false`; needs no stored file, the way
+for g >= 8). Times, residuals, and log2 of the relative differences after
+the common linear map (the kernels agree up to GL_g); with `gradients`
+also against odd_theta_gradients (g = 8: minutes to an hour). Needs
+ReconstructGenusG.jl.
 """
-function time_fay_kernel(g::Int; prec::Int = 256, seed::Int = 1, dense::Bool = true, verbose::Bool = false)
+function time_fay_kernel(g::Int; prec::Int = 256, seed::Int = 1, stored::Bool = true, dense::Bool = true,
+                         unit::Bool = true, gradients::Bool = true, verbose::Bool = false)
   tau = random_period_matrix(g, prec; seed = seed)
   t_thetas = @elapsed thetas = Hecke.thetas([zero(base_ring(tau)) for _ in 1:g], tau)
-  t_grad = @elapsed (K, _) = odd_theta_gradients(tau)
-  t_sparse = @elapsed (K_sparse, q_sparse) = odd_theta_gradient_kernel(g, thetas; sparse = true, verbose = verbose)
-  agree_sparse = _kernel_vs_gradients(K_sparse, K)
-  result = (g = g, n = nrows(K), time_thetas = t_thetas, time_gradients = t_grad,
-            time_sparse = t_sparse, residual_sparse = q_sparse, agreement_sparse = agree_sparse)
-  println("g = $g (n = $(nrows(K))): thetas $(round(t_thetas, digits = 2)) s, odd_theta_gradients $(round(t_grad, digits = 2)) s, ",
-          "Fay kernel sparse $(round(t_sparse, digits = 2)) s (residual 2^$(round(q_sparse, digits = 1)), vs gradients 2^$(round(agree_sparse, digits = 1)))")
-  if dense
+  n = length(odd_theta_characteristics(g))
+  result = (g = g, n = n, time_thetas = t_thetas)
+  println("g = $g (n = $n): thetas $(round(t_thetas, digits = 2)) s")
+  K = nothing
+  if gradients
+    t_grad = @elapsed (K, _) = odd_theta_gradients(tau)
+    result = merge(result, (time_gradients = t_grad,))
+    println("          odd_theta_gradients $(round(t_grad, digits = 2)) s")
+  end
+  vs(Kx) = K === nothing ? NaN : _kernel_vs_gradients(Kx, K)
+  K_sparse = nothing
+  if stored
+    t_sparse = @elapsed (K_sparse, q_sparse) = odd_theta_gradient_kernel(g, thetas; sparse = true, verbose = verbose)
+    agree_sparse = vs(K_sparse)
+    result = merge(result, (time_sparse = t_sparse, residual_sparse = q_sparse, agreement_sparse = agree_sparse))
+    println("          Fay kernel, stored relations, sparse $(round(t_sparse, digits = 2)) s (residual 2^$(round(q_sparse, digits = 1)), vs gradients 2^$(round(agree_sparse, digits = 1)))")
+  end
+  if unit
+    t_unit = @elapsed (K_unit, q_unit) = odd_theta_gradient_kernel(g, thetas; rhos = :unit, select = false, sparse = true, verbose = verbose)
+    agree_unit = vs(K_unit)
+    unit_vs_stored = K_sparse === nothing ? NaN : _kernel_vs_gradients(K_unit, K_sparse)
+    result = merge(result, (time_unit = t_unit, residual_unit = q_unit, agreement_unit = agree_unit, unit_vs_stored = unit_vs_stored))
+    println("          Fay kernel, all relations of the unit rhos, sparse $(round(t_unit, digits = 2)) s (residual 2^$(round(q_unit, digits = 1)), vs gradients 2^$(round(agree_unit, digits = 1)), vs stored 2^$(round(unit_vs_stored, digits = 1)))")
+  end
+  if dense && stored
     t_dense = @elapsed (K_dense, q_dense) = odd_theta_gradient_kernel(g, thetas; sparse = false, verbose = verbose)
-    agree_dense = _kernel_vs_gradients(K_dense, K)
+    agree_dense = vs(K_dense)
     # (the two kernels are normalized on possibly different free columns:
     # compare up to the common linear map)
     diff = _kernel_vs_gradients(K_dense, K_sparse)

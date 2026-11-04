@@ -107,6 +107,7 @@ filter( x -> x != zero(parent(x)), w)
 
 # The theta characteristics from the module (ThetaCharacteristics.jl is part
 # of Hecke.RiemannSurfaces; this development file is loaded in Main).
+using Hecke.RiemannSurfaces: integral_left_kernel   # (not exported from the module)
 using Hecke.RiemannSurfaces: odd_theta_characteristics, even_theta_characteristics,
                              char_to_index, lift_prym_indices
 

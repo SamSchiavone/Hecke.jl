@@ -741,21 +741,22 @@ function _quadrics_from_gradients(g::Int, K::AcbMatrix, K_prym::AcbMatrix; stric
   CC = base_ring(K)
   prec = precision(CC)
   lower(n) = [(i, j) for j in 1:n for i in j:n]
-  HiHis = lift_prym_indices(g)
-  n = length(HiHis)
-  HiHis = zero_matrix(CC, n, length(lower(g)))
-  lis = zero_matrix(CC, n, length(lower(g - 1)))
-  for (d, (i1, i2)) in enumerate(HiHis)
+  pairs = lift_prym_indices(g)             # per odd Prym characteristic d: the two odd curve characteristics
+  n = length(pairs)
+  products = zero_matrix(CC, n, length(lower(g)))        # l l' (symmetric, in the g coordinates)
+  squares = zero_matrix(CC, n, length(lower(g - 1)))     # m_d^2 (in the g - 1 coordinates of the Prym)
+  for (d, (i1, i2)) in enumerate(pairs)
     for (k, (a, b)) in enumerate(lower(g))
-      HiHis[d, k] = K[i1, a] * K[i2, b] + K[i2, a] * K[i1, b]
+      products[d, k] = K[i1, a] * K[i2, b] + K[i2, a] * K[i1, b]
     end
     for (k, (a, b)) in enumerate(lower(g - 1))
-      lis[d, k] = K_prym[d, a] * K_prym[d, b]
+      squares[d, k] = K_prym[d, a] * K_prym[d, b]
     end
   end
-  # the squares span all quadrics in g - 1 variables
-  O = RSR.numerical_kernel(transpose(lis); nullity = n - length(lower(g - 1)))[1]
-  q_relations = RSR._log2_relative_residual(transpose(lis), O)
+  # the squares span all quadrics in g - 1 variables; the relations
+  # sum_d c_d m_d^2 = 0 (the kernel O) give the quadrics sum_d c_d l l'
+  O = RSR.numerical_kernel(transpose(squares); nullity = n - length(lower(g - 1)))[1]
+  q_relations = RSR._log2_relative_residual(transpose(squares), O)
   @req !strict || q_relations < -prec / 4 "The squares of the Prym gradients do not span the quadrics (log2 residual $q_relations)."
   TT = transpose(O) * products
   e = div((g - 2) * (g - 3), 2)
